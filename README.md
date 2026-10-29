@@ -1,7 +1,5 @@
 # CanvasCord
-
-CanvasCord is a self-hostable, real-time communication platform for artists,
-creators, and hobbyists.
+CanvasCord is a self-hostable real-time chat platform for building niche online communities. Clone and spin up your own instance.
 
 ## Core Features
 
