@@ -26,7 +26,3 @@ CanvasCord is a self-hostable real-time chat platform for building niche online 
 - `backend/` — REST API and WebSocket server
 - `infrastructure/` — Docker and deployment configuration
 - `docs/` — Architecture and development documentation
-
-## Development Status
-
-Initial project setup.
