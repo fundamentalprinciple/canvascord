@@ -19,14 +19,12 @@ function createAccessToken(userId: string): string | null {
 
 router.post("/register", async (req: Request, res: Response) => {
   try {
+    const body = req.body ?? {};
     const username =
-      typeof req.body.username === "string" ? req.body.username.trim() : "";
+      typeof body.username === "string" ? body.username.trim() : "";
     const email =
-      typeof req.body.email === "string"
-        ? req.body.email.trim().toLowerCase()
-        : "";
-    const password =
-      typeof req.body.password === "string" ? req.body.password : "";
+      typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    const password = typeof body.password === "string" ? body.password : "";
 
     if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
       res.status(400).json({
@@ -105,10 +103,10 @@ router.post("/register", async (req: Request, res: Response) => {
 
 router.post("/login", async (req: Request, res: Response) => {
   try {
+    const body = req.body ?? {};
     const identifier =
-      typeof req.body.identifier === "string" ? req.body.identifier.trim() : "";
-    const password =
-      typeof req.body.password === "string" ? req.body.password : "";
+      typeof body.identifier === "string" ? body.identifier.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
 
     if (!identifier || !password) {
       res.status(400).json({ error: "Identifier and password are required" });
