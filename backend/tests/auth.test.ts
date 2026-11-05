@@ -2,10 +2,12 @@ import "dotenv/config";
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
 import { createServer, type Server } from "node:http";
 import app from "../src/app.js";
 import { connectDatabase } from "../src/config/database.js";
 import { User } from "../src/models/User.js";
+import { RefreshSession } from "../src/models/RefreshSession.js";
 
 const testUri = process.env.MONGODB_TEST_URI;
 
@@ -22,6 +24,7 @@ const password = "CanvasCord_Test_123!";
 let server: Server;
 let baseUrl: string;
 let accessToken: string;
+let refreshCookie: string;
 
 before(async () => {
   await connectDatabase();
@@ -46,6 +49,12 @@ after(async () => {
     });
   }
 
+  await RefreshSession.deleteMany({
+    user: {
+      $in: await User.find({ $or: [{ username }, { email }] }).distinct("_id"),
+    },
+  });
+
   await User.deleteMany({
     $or: [{ username }, { email }],
   });
@@ -53,12 +62,18 @@ after(async () => {
   await mongoose.disconnect();
 });
 
-async function request(path: string, body?: unknown, token?: string) {
+async function request(
+  path: string,
+  body?: unknown,
+  token?: string,
+  cookie?: string,
+) {
   return fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(cookie ? { Cookie: cookie } : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -77,8 +92,16 @@ test("registration creates a user and returns an access token", async () => {
   assert.equal(data.user.username, username);
   assert.equal(data.user.email, email);
   assert.ok(data.token);
-
   accessToken = data.token;
+
+  const cookies = response.headers.getSetCookie();
+  const refreshSetCookie = cookies.find((value) =>
+    value.startsWith("canvascord_refresh="),
+  );
+  assert.ok(refreshSetCookie);
+  assert.match(refreshSetCookie, /HttpOnly/i);
+  assert.match(refreshSetCookie, /SameSite=Lax/i);
+  refreshCookie = refreshSetCookie.split(";")[0];
 
   const user = await User.findOne({ username }).select("+passwordHash");
   assert.ok(user);
@@ -135,6 +158,134 @@ test("malformed and missing request bodies are rejected", async () => {
   });
 
   assert.equal(malformed.status, 400);
+});
+
+test("refresh rotates the refresh token and rejects reuse", async () => {
+  const firstCookie = refreshCookie;
+
+  const response = await request(
+    "/api/auth/refresh",
+    undefined,
+    undefined,
+    firstCookie,
+  );
+  assert.equal(response.status, 200);
+
+  const data = await response.json();
+  assert.ok(data.token);
+  accessToken = data.token;
+
+  const cookies = response.headers.getSetCookie();
+  const nextCookie = cookies
+    .find((value) => value.startsWith("canvascord_refresh="))
+    ?.split(";")[0];
+
+  assert.ok(nextCookie);
+  assert.notEqual(nextCookie, firstCookie);
+  refreshCookie = nextCookie;
+
+  const reused = await request(
+    "/api/auth/refresh",
+    undefined,
+    undefined,
+    firstCookie,
+  );
+  assert.equal(reused.status, 401);
+
+  const concurrentResponses = await Promise.all([
+    request("/api/auth/refresh", undefined, undefined, refreshCookie),
+    request("/api/auth/refresh", undefined, undefined, refreshCookie),
+  ]);
+
+  assert.deepEqual(
+    concurrentResponses.map((response) => response.status).sort(),
+    [200, 401],
+  );
+
+  const successfulResponse = concurrentResponses.find(
+    (response) => response.status === 200,
+  );
+  assert.ok(successfulResponse);
+
+  const concurrentCookie = successfulResponse.headers
+    .getSetCookie()
+    .find((value) => value.startsWith("canvascord_refresh="))
+    ?.split(";")[0];
+
+  assert.ok(concurrentCookie);
+  refreshCookie = concurrentCookie;
+});
+
+test("refresh rejects missing and invalid cookies", async () => {
+  const missing = await request("/api/auth/refresh");
+  assert.equal(missing.status, 401);
+
+  const invalid = await request(
+    "/api/auth/refresh",
+    undefined,
+    undefined,
+    "canvascord_refresh=invalid",
+  );
+  assert.equal(invalid.status, 401);
+});
+
+test("logout revokes the refresh session", async () => {
+  const session = await RefreshSession.findOne({
+    user: (await User.findOne({ username }))?._id,
+    revokedAt: null,
+  });
+  assert.ok(session);
+
+  const response = await request(
+    "/api/auth/logout",
+    undefined,
+    undefined,
+    refreshCookie,
+  );
+  assert.equal(response.status, 200);
+  assert.ok(
+    response.headers
+      .getSetCookie()
+      .some((value) => value.startsWith("canvascord_refresh=;")),
+  );
+
+  const revoked = await RefreshSession.findById(session._id);
+  assert.ok(revoked?.revokedAt);
+
+  const refreshAfterLogout = await request(
+    "/api/auth/refresh",
+    undefined,
+    undefined,
+    refreshCookie,
+  );
+  assert.equal(refreshAfterLogout.status, 401);
+});
+
+test("protected endpoint rejects expired and invalid-signature tokens", async () => {
+  const secret = process.env.JWT_ACCESS_SECRET;
+  assert.ok(secret);
+
+  const expiredToken = jwt.sign({}, secret, {
+    subject: "507f1f77bcf86cd799439011",
+    expiresIn: -1,
+  });
+
+  const invalidSignatureToken = jwt.sign(
+    {},
+    "wrong-secret-that-is-long-enough-for-testing",
+    {
+      subject: "507f1f77bcf86cd799439011",
+      expiresIn: "15m",
+    },
+  );
+
+  for (const token of [expiredToken, invalidSignatureToken]) {
+    const response = await fetch(`${baseUrl}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    assert.equal(response.status, 401);
+  }
 });
 
 test("protected profile endpoint requires and accepts authentication", async () => {

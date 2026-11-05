@@ -4,18 +4,18 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
 import { requireAuth, type AuthRequest } from "../middleware/auth.js";
+import { RefreshSession } from "../models/RefreshSession.js";
+import {
+  createAccessToken,
+  createRefreshToken,
+  hashRefreshToken,
+  REFRESH_TOKEN_TTL_MS,
+  REFRESH_COOKIE_NAME,
+  refreshCookieOptions,
+  verifyRefreshToken,
+} from "../utils/authTokens.js";
 
 const router = Router();
-
-function createAccessToken(userId: string): string | null {
-  const secret = process.env.JWT_ACCESS_SECRET;
-  if (!secret || secret.length < 32) return null;
-
-  return jwt.sign({}, secret, {
-    subject: userId,
-    expiresIn: "15m",
-  });
-}
 
 router.post("/register", async (req: Request, res: Response) => {
   try {
@@ -67,15 +67,21 @@ router.post("/register", async (req: Request, res: Response) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await User.create({ username, email, passwordHash });
-    const token = createAccessToken(user.id);
 
-    if (!token) {
-      res.status(500).json({ error: "Authentication is not configured" });
-      return;
-    }
+    const accessToken = createAccessToken(user.id);
+    const session = await RefreshSession.create({
+      user: user._id,
+      tokenHash: "pending",
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+    });
 
+    const refreshToken = createRefreshToken(user.id, session.id);
+    session.tokenHash = hashRefreshToken(refreshToken);
+    await session.save();
+
+    res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions);
     res.status(201).json({
-      token,
+      token: accessToken,
       user: {
         id: user.id,
         username: user.username,
@@ -122,14 +128,20 @@ router.post("/login", async (req: Request, res: Response) => {
       return;
     }
 
-    const token = createAccessToken(user.id);
-    if (!token) {
-      res.status(500).json({ error: "Authentication is not configured" });
-      return;
-    }
+    const accessToken = createAccessToken(user.id);
+    const session = await RefreshSession.create({
+      user: user._id,
+      tokenHash: "pending",
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+    });
 
+    const refreshToken = createRefreshToken(user.id, session.id);
+    session.tokenHash = hashRefreshToken(refreshToken);
+    await session.save();
+
+    res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions);
     res.json({
-      token,
+      token: accessToken,
       user: {
         id: user.id,
         username: user.username,
@@ -141,6 +153,94 @@ router.post("/login", async (req: Request, res: Response) => {
     console.error("Login failed:", error);
     res.status(500).json({ error: "Login failed" });
   }
+});
+
+router.post("/refresh", async (req: Request, res: Response) => {
+  try {
+    const token = req.cookies?.[REFRESH_COOKIE_NAME];
+
+    if (typeof token !== "string") {
+      res.status(401).json({ error: "Refresh token required" });
+      return;
+    }
+
+    const payload = verifyRefreshToken(token);
+    const now = new Date();
+
+    const session = await RefreshSession.findOneAndUpdate(
+      {
+        _id: payload.jti,
+        user: payload.sub,
+        tokenHash: hashRefreshToken(token),
+        revokedAt: null,
+        expiresAt: { $gt: now },
+      },
+      {
+        $set: {
+          tokenHash: "rotating",
+          expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+        },
+      },
+      { returnDocument: "after" },
+    );
+
+    if (!session) {
+      res.status(401).json({ error: "Invalid refresh token" });
+      return;
+    }
+
+    const user = await User.findById(session.user);
+
+    if (!user) {
+      session.revokedAt = new Date();
+      await session.save();
+      res.status(401).json({ error: "Invalid refresh token" });
+      return;
+    }
+
+    const nextRefreshToken = createRefreshToken(user.id, session.id);
+
+    const updated = await RefreshSession.updateOne(
+      { _id: session._id, tokenHash: "rotating" },
+      { $set: { tokenHash: hashRefreshToken(nextRefreshToken) } },
+    );
+
+    if (updated.modifiedCount !== 1) {
+      res.status(401).json({ error: "Invalid refresh token" });
+      return;
+    }
+
+    res.cookie(REFRESH_COOKIE_NAME, nextRefreshToken, refreshCookieOptions);
+    res.json({ token: createAccessToken(user.id) });
+  } catch {
+    res.status(401).json({ error: "Invalid or expired refresh token" });
+  }
+});
+
+router.post("/logout", async (req: Request, res: Response) => {
+  const token = req.cookies?.[REFRESH_COOKIE_NAME];
+
+  if (typeof token === "string") {
+    try {
+      const payload = verifyRefreshToken(token);
+      const session = await RefreshSession.findById(payload.jti);
+
+      if (
+        session &&
+        !session.revokedAt &&
+        session.user.toString() === payload.sub &&
+        session.tokenHash === hashRefreshToken(token)
+      ) {
+        session.revokedAt = new Date();
+        await session.save();
+      }
+    } catch {
+      // Invalid or expired cookies are still cleared below.
+    }
+  }
+
+  res.clearCookie(REFRESH_COOKIE_NAME, refreshCookieOptions);
+  res.json({ message: "Logged out successfully" });
 });
 
 router.get("/me", requireAuth, async (req: AuthRequest, res: Response) => {
