@@ -147,6 +147,47 @@ test("login accepts username and email", async () => {
   }
 });
 
+test("registration and login reject invalid fields with validation details", async () => {
+  const invalidRegistration = await request("/api/auth/register", {
+    username: "ab",
+    email: "not-an-email",
+    password: "short",
+  });
+
+  assert.equal(invalidRegistration.status, 400);
+
+  const registrationData = await invalidRegistration.json();
+  assert.equal(registrationData.error, "Validation failed");
+  assert.ok(Array.isArray(registrationData.details));
+  assert.ok(
+    registrationData.details.some(
+      (issue: { path: string }) => issue.path === "body.username",
+    ),
+  );
+  assert.ok(
+    registrationData.details.some(
+      (issue: { path: string }) => issue.path === "body.email",
+    ),
+  );
+  assert.ok(
+    registrationData.details.some(
+      (issue: { path: string }) => issue.path === "body.password",
+    ),
+  );
+
+  const invalidLogin = await request("/api/auth/login", {
+    identifier: "   ",
+    password: "",
+  });
+
+  assert.equal(invalidLogin.status, 400);
+
+  const loginData = await invalidLogin.json();
+  assert.equal(loginData.error, "Validation failed");
+  assert.ok(Array.isArray(loginData.details));
+  assert.equal(loginData.details.length, 2);
+});
+
 test("malformed and missing request bodies are rejected", async () => {
   const missing = await request("/api/auth/register");
   assert.equal(missing.status, 400);

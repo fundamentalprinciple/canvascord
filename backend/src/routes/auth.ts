@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { validateRequest } from "../middleware/validateRequest.js";
+import { registerSchema, loginSchema } from "../schemas/auth.js";
 import type { Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -17,143 +19,118 @@ import {
 
 const router = Router();
 
-router.post("/register", async (req: Request, res: Response) => {
-  try {
-    const body = req.body ?? {};
-    const username =
-      typeof body.username === "string" ? body.username.trim() : "";
-    const email =
-      typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
-    const password = typeof body.password === "string" ? body.password : "";
+router.post(
+  "/register",
+  validateRequest(registerSchema),
+  async (req: Request, res: Response) => {
+    try {
+      const { username, email, password } = res.locals.validated.body;
 
-    if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
-      res.status(400).json({
-        error:
-          "Username must be 3–32 characters: letters, numbers, underscores",
+      if (
+        !process.env.JWT_ACCESS_SECRET ||
+        process.env.JWT_ACCESS_SECRET.length < 32
+      ) {
+        res.status(500).json({ error: "Authentication is not configured" });
+        return;
+      }
+
+      const existing = await User.findOne({
+        $or: [{ username }, { email }],
+      }).lean();
+
+      if (existing) {
+        res
+          .status(409)
+          .json({ error: "Username or email is already registered" });
+        return;
+      }
+
+      const passwordHash = await bcrypt.hash(password, 12);
+      const user = await User.create({ username, email, passwordHash });
+
+      const accessToken = createAccessToken(user.id);
+      const session = await RefreshSession.create({
+        user: user._id,
+        tokenHash: "pending",
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
       });
-      return;
-    }
 
-    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      res.status(400).json({ error: "A valid email is required" });
-      return;
-    }
+      const refreshToken = createRefreshToken(user.id, session.id);
+      session.tokenHash = hashRefreshToken(refreshToken);
+      await session.save();
 
-    if (password.length < 12 || password.length > 128) {
-      res.status(400).json({
-        error: "Password must be between 12 and 128 characters",
+      res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions);
+      res.status(201).json({
+        token: accessToken,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          avatarUrl: user.avatarUrl,
+        },
       });
-      return;
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === 11000
+      ) {
+        res
+          .status(409)
+          .json({ error: "Username or email is already registered" });
+        return;
+      }
+
+      console.error("Registration failed:", error);
+      res.status(500).json({ error: "Registration failed" });
     }
+  },
+);
 
-    if (
-      !process.env.JWT_ACCESS_SECRET ||
-      process.env.JWT_ACCESS_SECRET.length < 32
-    ) {
-      res.status(500).json({ error: "Authentication is not configured" });
-      return;
+router.post(
+  "/login",
+  validateRequest(loginSchema),
+  async (req: Request, res: Response) => {
+    try {
+      const { identifier, password } = res.locals.validated.body;
+
+      const user = await User.findOne({
+        $or: [{ email: identifier.toLowerCase() }, { username: identifier }],
+      }).select("+passwordHash");
+
+      if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+        res.status(401).json({ error: "Invalid credentials" });
+        return;
+      }
+
+      const accessToken = createAccessToken(user.id);
+      const session = await RefreshSession.create({
+        user: user._id,
+        tokenHash: "pending",
+        expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+      });
+
+      const refreshToken = createRefreshToken(user.id, session.id);
+      session.tokenHash = hashRefreshToken(refreshToken);
+      await session.save();
+
+      res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions);
+      res.json({
+        token: accessToken,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          avatarUrl: user.avatarUrl,
+        },
+      });
+    } catch (error) {
+      console.error("Login failed:", error);
+      res.status(500).json({ error: "Login failed" });
     }
-
-    const existing = await User.findOne({
-      $or: [{ username }, { email }],
-    }).lean();
-
-    if (existing) {
-      res
-        .status(409)
-        .json({ error: "Username or email is already registered" });
-      return;
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12);
-    const user = await User.create({ username, email, passwordHash });
-
-    const accessToken = createAccessToken(user.id);
-    const session = await RefreshSession.create({
-      user: user._id,
-      tokenHash: "pending",
-      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
-    });
-
-    const refreshToken = createRefreshToken(user.id, session.id);
-    session.tokenHash = hashRefreshToken(refreshToken);
-    await session.save();
-
-    res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions);
-    res.status(201).json({
-      token: accessToken,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        avatarUrl: user.avatarUrl,
-      },
-    });
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === 11000
-    ) {
-      res
-        .status(409)
-        .json({ error: "Username or email is already registered" });
-      return;
-    }
-
-    console.error("Registration failed:", error);
-    res.status(500).json({ error: "Registration failed" });
-  }
-});
-
-router.post("/login", async (req: Request, res: Response) => {
-  try {
-    const body = req.body ?? {};
-    const identifier =
-      typeof body.identifier === "string" ? body.identifier.trim() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-
-    if (!identifier || !password) {
-      res.status(400).json({ error: "Identifier and password are required" });
-      return;
-    }
-
-    const user = await User.findOne({
-      $or: [{ email: identifier.toLowerCase() }, { username: identifier }],
-    }).select("+passwordHash");
-
-    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
-    }
-
-    const accessToken = createAccessToken(user.id);
-    const session = await RefreshSession.create({
-      user: user._id,
-      tokenHash: "pending",
-      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
-    });
-
-    const refreshToken = createRefreshToken(user.id, session.id);
-    session.tokenHash = hashRefreshToken(refreshToken);
-    await session.save();
-
-    res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions);
-    res.json({
-      token: accessToken,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        avatarUrl: user.avatarUrl,
-      },
-    });
-  } catch (error) {
-    console.error("Login failed:", error);
-    res.status(500).json({ error: "Login failed" });
-  }
-});
+  },
+);
 
 router.post("/refresh", async (req: Request, res: Response) => {
   try {

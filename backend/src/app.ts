@@ -1,7 +1,8 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import type { Request, Response } from "express";
+import type { Request, Response, ErrorRequestHandler } from "express";
+import { ZodError } from "zod";
 import authRoutes from "./routes/auth.js";
 
 const app = express();
@@ -21,24 +22,31 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 export default app;
-app.use(
-  (
-    error: Error & { status?: number; type?: string },
-    _req: Request,
-    res: Response,
-    _next: (error?: Error) => void,
-  ) => {
-    if (error.type === "entity.parse.failed") {
-      res.status(400).json({ error: "Invalid JSON body" });
-      return;
-    }
 
-    console.error("Request error:", error);
-    res.status(error.status ?? 500).json({
-      error:
-        error.status && error.status < 500
-          ? "Invalid request"
-          : "Internal server error",
+const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+  if (error instanceof ZodError) {
+    res.status(400).json({
+      error: "Validation failed",
+      details: error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
     });
-  },
-);
+    return;
+  }
+
+  if (error.type === "entity.parse.failed") {
+    res.status(400).json({ error: "Invalid JSON body" });
+    return;
+  }
+
+  console.error("Request error:", error);
+  res.status(error.status ?? 500).json({
+    error:
+      error.status && error.status < 500
+        ? "Invalid request"
+        : "Internal server error",
+  });
+};
+
+app.use(errorHandler);
