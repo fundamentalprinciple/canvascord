@@ -15,6 +15,12 @@ const channelSchema = new Schema(
       required: true,
       default: "TEXT",
     },
+    topic: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: "",
+    },
     isPrivate: {
       type: Boolean,
       default: false,

@@ -4,6 +4,7 @@ import cookieParser from "cookie-parser";
 import type { Request, Response, ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
 import authRoutes from "./routes/auth.js";
+import channelRoutes from "./routes/channels.js";
 
 const app = express();
 
@@ -16,6 +17,7 @@ app.use(
 app.use(express.json({ limit: "16kb" }));
 app.use(cookieParser());
 app.use("/api/auth", authRoutes);
+app.use("/api/channels", channelRoutes);
 
 app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok", service: "canvascord-backend" });
